@@ -1,5 +1,5 @@
 #!/bin/bash
-# qv.sh
+# sge_info.sh
 # by Shan Sabri, github.com/ShanSabri
 # 
 # Description: Get usage information and availability for each node on SGE.
