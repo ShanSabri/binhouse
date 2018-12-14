@@ -1,15 +1,15 @@
 ### Setup
 rm(list = ls(all = TRUE))
 options(warn = -1)
-setwd("~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_analysis/other/overlap-genes-with-atak-and-state/")
+setwd("~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_analysis/other/overlap-genes-with-atac-and-state/")
 
 
 
 ### LIBS
 pacman::p_load(
-  pheatmap, ggplot2,
+  pheatmap, ggplot2, gplots,
   biomaRt, GenomicRanges,
-  rtracklayer, tidyverse
+  rtracklayer, tidyverse, bedr, marge
 )
 
 
@@ -90,6 +90,29 @@ feature_overlap <- function(peak, tss, extend_upstream = 20000, extend_downstrea
   return(overlaps)
 }
 
+state_overlap <- function(peak, states, extend_upstream = 0, extend_downstream = 0) {
+  names(peak) <- seq(1:length(peak))
+  window <- seq(1:length(states))
+  states_ext <- extend(states[window], extend_upstream, extend_downstream)
+  names(states_ext) <- window
+
+  hits <- findOverlaps(states_ext, peak, ignore.strand = FALSE)
+
+  overlaps <- data.frame(
+    state = states$state[hits@from],
+    state_chr = chrom(states)[hits@from],
+    state_start = start(states_ext)[hits@from],
+    state_end = end(states_ext)[hits@from],
+    peak_id = names(peak)[hits@to],
+    peak_start = start(peak)[hits@to],
+    peak_end = end(peak)[hits@to]
+  )
+
+  overlaps <- with(overlaps, GRanges(state_chr, IRanges(peak_start, peak_end)))
+
+  return(overlaps)
+}
+
 run_homer <- function(file, out, fa = " ~/Dropbox/Binhouse/mm9.fa", bg = NULL, dry = TRUE) {
   Sys.setenv(PATH = paste0(
     "/usr/local/opt/libxml2/bin:/Users/shansabri/miniconda3/bin:/Library/Frameworks/Python.framework/Versions/3.4/bin:",
@@ -130,6 +153,13 @@ state_annot <- readRDS("~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_
 
 
 
+### LOOK ONLY AT PEAKS THAT OVERLAP CHROMATIN STATES
+# promoters <- state_annot[ state_annot$state %in% paste0("E", c(1, 2, 3, 4)) ]
+# enhancers <- state_annot[ state_annot$state %in% paste0("E", seq(5, 18, 1)) ]
+# atac <- state_overlap(peak = atac, states = promoters, extend_upstream = 0, extend_downstream = 0)
+
+
+
 
 ### PROGRAM DATA
 programs <- readRDS("~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_analysis/data/metanetwork/Drop10.Aggregated.Programs.Gene.Master.List.rds")
@@ -144,19 +174,114 @@ programs <- lapply(programs, function(x) with(x, GRanges(seqnames, IRanges(start
 
 ### COMPUTE OVERLAP OF PEAK GIVEN PROGRAM GENES
 overlaps <- lapply(programs, function(p) feature_overlap(peak = atac, tss = p, extend_upstream = 20000, extend_downstream = 20000))
-# lapply(overlaps, nrow)
+
+
+
+
+### PLOT DISTRIBITON OF PEAK WIDTHS
+pdf(paste(getwd(), "PEAK-WIDTHS.pdf", sep = "/"), height = 6, width = 7)
+lapply(seq_along(overlaps), function(o) {
+  id <- names(overlaps)[o]
+  print(ggplot(overlaps[[o]], aes(peak_end - peak_start)) +
+    geom_density(fill = "grey") +
+    labs(x = "Peak Width", y = "Density", title = id) +
+    theme_bw(base_size = 14) +
+    theme(panel.grid = element_blank()))
+})
+dev.off()
+
+
+
+
+### SOME PEAKS ARE VERY SMALL (1bp)
+### SO LET'S EXTEND THEM OUT AND MERGE OVERLAPS
+merged_overlaps <- lapply(overlaps, function(x) {
+  x$width <- x$peak_end - x$peak_start
+  x$peak_start[x$width == 1] <- x$peak_start[x$width == 1] - 100
+  x$peak_end[x$width == 1] <- x$peak_end[x$width == 1] + 100
+  x$width <- x$peak_end - x$peak_start
+  merged_peaks <- bedr.merge.region(
+    x = paste0(x$gene_chr, ":", x$peak_start, "-", x$peak_end),
+    distance = 2,
+    list.names = TRUE,
+    number = FALSE,
+    stratify.by = NULL,
+    check.zero.based = TRUE,
+    check.chr = TRUE,
+    check.valid = TRUE,
+    check.sort = TRUE,
+    verbose = TRUE
+  )
+  bed <- convert2bed(merged_peaks)
+})
 
 
 
 
 ### HOMER
-homer <- lapply(seq_along(overlaps), function(o) {
-  dir <- names(overlaps)[o]
-  dir.create(dir)
-  b <- with(overlaps[[o]], GRanges(gene_chr, IRanges(peak_start, peak_end)))
+homer <- lapply(seq_along(merged_overlaps), function(o) {
+  dir <- names(merged_overlaps)[o]
+  dir.create(dir, showWarnings = FALSE)
+  b <- with(merged_overlaps[[o]], GRanges(chr, IRanges(start, end)))
+  df <- data.frame(seqnames = seqnames(b), starts = start(b) - 1, ends = end(b))
   f <- paste(dir, paste(dir, "bed", sep = "."), sep = "/")
-  write.table(data.frame(seqnames = seqnames(b), starts = start(b) - 1, ends = end(b)),
-    file = f, quote = FALSE, sep = "\t", row.names = F, col.names = F
-  )
+  write.table(df, file = f, quote = FALSE, sep = "\t", row.names = F, col.names = F)
   run_homer(file = f, out = dir, bg = NULL, dry = FALSE)
 })
+
+
+
+
+### VISUALIZE AGGREGRATED MOTIF ENRICHMENT
+dir <- "~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_analysis/other/overlap-genes-with-atac-and-state/1_atac"
+res <- list.dirs(dir, full.names = TRUE, recursive = FALSE)
+all_motif_results <- do.call(rbind.data.frame, lapply(seq_along(res), function(x) {
+  # denovo <- read_denovo_results(path = x, homer_dir = TRUE)
+  known <- read_known_results(path = res[[x]], homer_dir = TRUE)
+  known$ID <- basename(res)[x]
+  known <- subset(known, database == "Homer")
+  known
+}))
+saveRDS(all_motif_results, compress = TRUE, paste(dir, "RESULTS.rds", sep = "/"))
+
+# # WHAT ARE THE TOP 10 MOTIFS FOR EACH GENE SET?
+# all_motif_results %>%
+#   group_by(ID) %>%
+#   top_n(log_p_value, n = 10) %>%
+#   dplyr::select(., motif_name, motif_family, experiment, accession, log_p_value) %>%
+#   ungroup() %>%
+#   write_tsv("~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_analysis/other/overlap-genes-with-atac-and-state/1_atac/TOP10-MOTIFS-BY-PROGRAM.txt",
+#             na = "NA",  quote_escape = "double")
+
+
+motif_df <- reshape2::dcast(all_motif_results, motif_name + motif_family + accession + consensus ~ ID,
+  value.var = "log_p_value", fun.aggregate = max
+)
+row.names(motif_df) <- paste(motif_df$motif_name, motif_df$motif_family, motif_df$accession, motif_df$consensus, sep = "/")
+motif_df$motif_name <- NULL
+motif_df$motif_family <- NULL
+motif_df$accession <- NULL
+motif_df$consensus <- NULL
+
+programs <- readRDS("~/Dropbox/PlathLab/Analyses/Justin_Langerman/Timecourse_analysis/data/metanetwork/Drop10.Aggregated.Programs.Gene.Master.List.rds")
+order_of_progs <- unique(programs[, c("Order", "Set")])
+motif_df <- motif_df[, as.vector(order_of_progs$Set)]
+motif_df$max_p_val <- apply(motif_df, 1, max)
+
+maxs <- seq(10, 100, by = 10)
+pdf(paste(getwd(), paste0("ENRICHED_MOTIFS_MAX_THRESHOLD.pdf"), sep = "/"), height = 15, width = 10)
+lapply(maxs, function(x) {
+  tmp <- subset(motif_df, max_p_val >= x)
+  tmp$max_p_val <- NULL
+  # heatmap.2(as.matrix(log10(tmp + 1)),
+  heatmap.2(as.matrix(tmp),
+    Rowv = TRUE,
+    Colv = FALSE,
+    trace = "none",
+    na.color = "grey",
+    margins = c(8, 20),
+    col = cm.colors(255),
+    main = paste("Max log_p_value >=", x)
+  )
+})
+dev.off()
