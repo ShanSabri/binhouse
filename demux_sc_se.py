@@ -1,4 +1,14 @@
-#-*- coding:utf-8-*-
+#!/usr/bin/env python
+
+
+'''
+demux_sc_se.py
+Shan Sabri
+Dec. 29, 2018
+Demultiplex single cell ChIP-seq data (single end)
+I: QSEQ
+O: Compressed FQ
+'''
 
 
 import datetime, os, editdistance, gzip
